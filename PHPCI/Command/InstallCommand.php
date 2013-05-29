@@ -38,13 +38,20 @@ class InstallCommand extends Command
     protected function execute(InputInterface $input, OutputInterface $output)
     {
         // Gather initial data from the user:
-        $dbHost = $this->ask('Enter your MySQL host: ');
-        $dbName = $this->ask('Enter the database name PHPCI should use: ');
-        $dbUser = $this->ask('Enter your MySQL username: ');
-        $dbPass = $this->ask('Enter your MySQL password: ', true);
-        $ciUrl = $this->ask('Your PHPCI URL (without trailing slash): ');
-        $ghId = $this->ask('(Optional) Github Application ID: ', true);
-        $ghSecret = $this->ask('(Optional) Github Application Secret: ', true);
+        $conf = array();
+        $conf['b8']['database']['servers']['read']  = $this->ask('Enter your MySQL host: ');
+        $conf['b8']['database']['servers']['write'] = $conf['b8']['database']['servers']['read'];
+        $conf['b8']['database']['name']             = $this->ask('Enter the database name PHPCI should use: ');
+        $conf['b8']['database']['username']         = $this->ask('Enter your MySQL username: ');
+        $conf['b8']['database']['password']         = $this->ask('Enter your MySQL password: ', true);
+        $conf['phpci']['url']                       = $this->ask('Your PHPCI URL (without trailing slash): ', false, array(FILTER_VALIDATE_URL,"/[^\/]$/i"));
+        $conf['phpci']['github']['id']              = $this->ask('(Optional) Github Application ID: ', true);
+        $conf['phpci']['github']['secret']          = $this->ask('(Optional) Github Application Secret: ', true);
+
+        $dbUser = $conf['b8']['database']['username'];
+        $dbPass = $conf['b8']['database']['password'];
+        $dbHost = $conf['b8']['database']['servers']['write'];
+        $dbName = $conf['b8']['database']['name'];
 
         // Create the database if it doesn't exist:
         $cmd    = 'mysql -u' . $dbUser . (!empty($dbPass) ? ' -p' . $dbPass : '') . ' -h' . $dbHost .
@@ -52,29 +59,11 @@ class InstallCommand extends Command
 
         shell_exec($cmd);
 
-        $str = "<?php
+        $dumper = new \Symfony\Component\Yaml\Dumper();
+        $yaml = $dumper->dump($conf);
 
-if(!defined('PHPCI_DB_HOST')) {
-    define('PHPCI_DB_HOST', '{$dbHost}');
-}
+        file_put_contents(PHPCI_DIR . 'PHPCI/config.yml', $yaml);
 
-b8\Database::setDetails('{$dbName}', '{$dbUser}', '{$dbPass}');
-b8\Database::setWriteServers(array('{$dbHost}'));
-b8\Database::setReadServers(array('{$dbHost}'));
-
-\$config = b8\Config::getInstance();
-\$config->set('install_url', '{$ciUrl}');
-";
-
-        // Has the user entered Github app details? If so add those to config:
-        if (!empty($ghId) && !empty($ghSecret)) {
-            $str .= PHP_EOL .
-                    "\$registry->set('github_app', array('id' => '{$ghId}', 'secret' => '{$ghSecret}'));" .
-                    PHP_EOL;
-        }
-
-        // Write the config file and then re-bootstrap:
-        file_put_contents(PHPCI_DIR . 'config.php', $str);
         require(PHPCI_DIR . 'bootstrap.php');
 
         // Update the database:
@@ -82,12 +71,11 @@ b8\Database::setReadServers(array('{$dbHost}'));
         $gen->generate();
 
         // Try to create a user account:
-        $adminEmail = $this->ask('Enter your email address (leave blank if updating): ', true);
+        $adminEmail = $this->ask('Enter your email address (leave blank if updating): ', true, FILTER_VALIDATE_EMAIL);
 
         if (empty($adminEmail)) {
             return;
         }
-        
         $adminPass = $this->ask('Enter your desired admin password: ');
         $adminName = $this->ask('Enter your name: ');
 
@@ -108,7 +96,7 @@ b8\Database::setReadServers(array('{$dbHost}'));
         }
     }
 
-    protected function ask($question, $emptyOk = false)
+    protected function ask($question, $emptyOk = false, $validationFilter = null)
     {
         print $question . ' ';
 
@@ -120,9 +108,51 @@ b8\Database::setReadServers(array('{$dbHost}'));
         $rtn = trim($rtn);
 
         if (!$emptyOk && empty($rtn)) {
-            $rtn = $this->ask($question, $emptyOk);
+            $rtn = $this->ask($question, $emptyOk, $validationFilter);
+        } elseif ($validationFilter != null  && ! empty($rtn)) {
+            if (! $this -> controlFormat($rtn, $validationFilter, $statusMessage)) {
+                print $statusMessage;
+                $rtn = $this->ask($question, $emptyOk, $validationFilter);
+            }
         }
 
         return $rtn;
+    }
+    protected function controlFormat($valueToInspect,$filter,&$statusMessage)
+    {
+        $filters = !(is_array($filter))? array($filter) : $filter;
+        $statusMessage = '';
+        $status = true;
+        $options = array();
+
+        foreach ($filters as $filter) {
+            if (! is_int($filter)) {
+                $regexp = $filter;
+                $filter = FILTER_VALIDATE_REGEXP;
+                $options = array(
+                    'options' => array(
+                        'regexp' => $regexp,
+                    )
+                );
+            }
+            if (! filter_var($valueToInspect, $filter, $options)) {
+                $status = false;
+
+                switch ($filter)
+                {
+                    case FILTER_VALIDATE_URL :
+                        $statusMessage = 'Incorrect url format.' . PHP_EOL;
+                        break;
+                    case FILTER_VALIDATE_EMAIL :
+                        $statusMessage = 'Incorrect e-mail format.' . PHP_EOL;
+                        break;
+                    case FILTER_VALIDATE_REGEXP :
+                        $statusMessage = 'Incorrect format.' . PHP_EOL;
+                        break;
+                }
+            }
+        }
+
+        return $status;
     }
 }
